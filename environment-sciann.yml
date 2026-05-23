@@ -1,0 +1,8 @@
+name: epipinn-sciann-py36
+channels:
+  - defaults
+dependencies:
+  - python=3.6.13
+  - pip=21.3.1
+  - pip:
+      - -r requirements.txt
