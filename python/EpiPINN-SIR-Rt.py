@@ -49,6 +49,7 @@ case = 2
 
 # 根据 case 选择对应的模拟数据文件
 # Case 2 和 Case 3 都是 SIR-Rt 形式，区别在于 Rt 的时变设定
+# ./Case2.txt ./Case3.txt里的数据是怎么来的？
 if case==2:
     df_SIR = pd.read_table("./Case2.txt")
 if case==3:
@@ -109,9 +110,10 @@ I_data = df_SIR["Infectious"].values
 R_data = df_SIR["Recovered"].values
 I_obs  = df_SIR["I data"].values
 Rt_data = df_SIR["Rt"].values
-beta_data = Rt_data*delta
+beta_data = Rt_data*delta # beta(t)=delta*Rt(t)，用于后续和网络识别结果对比
 
-# beta(t)=delta*Rt(t)，用于后续和网络识别结果对比
+# 缩放数据
+# 感染观测 I_obs 同样缩放；时间 t_data 和 t_test 也缩放到 [0,1] 区间
 I_obs_sc  = I_obs/C
 I_data_sc = I_data/C
 t_data_sc = t_data/tf
@@ -184,6 +186,7 @@ Ss = sn.Functional("Ss", ts, 4*[50], output_activation='square')
 Is = sn.Functional("Is", ts, 4*[50], output_activation='square')
 
 # Beta 用函数网络表示 beta_s_hat(ts)，square 输出保证非负
+# Beta 的网络结构更大一些，便于学习时变传播率的复杂变化
 Beta = sn.Functional("Beta", ts, 4*[100], output_activation='square')
 
 # 根据守恒关系 R_s = N/C - I_s - S_s 计算恢复者变量
@@ -318,7 +321,7 @@ I_pred = Is.eval(m, t_data_sc)*C
 R_pred = Rs.eval(m, t_data_sc)*C
 beta_pred = Beta.eval(m, t_data_sc)
 
-S_err = np.linalg.norm(S_data-S_pred,2)/np.linalg.norm(S_data,2)
+S_err = np.linalg.norm(S_data-S _pred,2)/np.linalg.norm(S_data,2)
 I_err = np.linalg.norm(I_data-I_pred,2)/np.linalg.norm(I_data,2)
 R_err = np.linalg.norm(R_data-R_pred,2)/np.linalg.norm(R_data,2)
 beta_err = np.linalg.norm(beta_data-beta_pred,2)/np.linalg.norm(beta_data,2)

@@ -48,10 +48,13 @@ beta = delta*r0 # (1/T) transmission rate
 t0   = 0.       # (days) initial time
 tf = 90.        # (days) final time
 
-C = 1e5
-C1 = tf*C/N   
-C2 = tf*delta
+# 缩放因子：对应Eq. (6)
+C = 1e5  # 缩放因子，按人口量级选取，便于 PINN 训练；C 的选择会影响训练稳定性和收敛速度
+C1 = tf*C/N  # 对应论文 Eq. (6) 中的 C1 = tf*C/N，表示时间和人数的联合缩放因子
+C2 = tf*delta # 对应论文 Eq. (6) 中的 C2 = tf*delta，表示时间和感染期的联合缩放因子
 
+
+# %%
 
 # In[ ]:
 
@@ -61,7 +64,7 @@ C2 = tf*delta
 # lambda_val = beta * I / N，表示感染力项 beta*I/N
 def SIR(x, t, delta, beta, N, t0):
     S, I, R = x
-    lambda_val = beta*I/N;
+    lambda_val = beta*I/N;  # 感染力项，表示每个感染者每天感染的人数
     dSdt = -lambda_val*S
     dIdt = lambda_val*S - delta*I
     dRdt = delta*I
@@ -80,19 +83,18 @@ timespan = np.arange('2020-02-01', '2020-05-01', dtype='datetime64[D]')
 tspan = timespan.astype(int)
 
 # 用 ODE 解生成时间序列和参考数据
-# 先求解参考 ODE，再用于 PINN 对比
+# 根据 SIR 这个变化率函数，从初始值 x0 出发，数值积分得到的 S(t), I(t), R(t) 在 tspan 各个时间点上的值。
 x = odeint(SIR, x0, tspan, args=(delta, beta, N, tspan[0]))
 
 S_data = x[:, 0]
 I_data = x[:, 1]
 R_data = x[:, 2]
 
-# 为观测感染人数加入泊松采样
-# 画出 S/R 与 I/观测数据
+# 观测数据 I_obs 是对 I_data 的泊松采样: 在固定时间段内，某类事件发生了多少次。
+# 也就是说，假设 ODE 解出来的 I_data(t) 是某一天感染人数的“期望值”，真实观测到的 I_obs(t) 会围绕这个值随机波动。
 I_obs = np.random.poisson(I_data)
 
 # 画出 S/R 与 I/观测数据
-# I_obs 是对 I_data 的泊松采样，用于模拟观测误差
 plt.figure(figsize=(10, 10))
 plt.subplot(2, 1, 1)
 plt.plot(timespan, S_data, 'b', label='Susceptible')
@@ -114,12 +116,12 @@ plt.show()
 # In[ ]:
 
 
-# 对变量做归一化：S=C*S_s, I=C*I_s, t_s=t/t_f，对应论文 Eq. (5)-(6)
-# 这里是对 PINN 输入输出的尺度变换，便于 SciANN 训练
 # 构造训练时间 t_data 和测试时间 t_test
 t_data = np.arange(t0,tf)
 t_test = np.arange(t0,tf,0.1)
 
+# 对变量进行缩放：I_s=I/C，t_s=(t-t0)/tf，对应论文 Eq. (6)
+# 这里是对 PINN 输入输出的尺度变换，便于 SciANN 训练
 I_obs_sc  = I_obs/C
 I_data_sc = I_data/C
 t_data_sc = t_data/tf
@@ -136,8 +138,6 @@ if weekly:
 
 
 # 损失函数使用 MSE，优化器使用 Adam，并启用 NTK 自适应权重
-# loss_err='mse' 指定均方误差损失，optimizer='adam' 指定优化器
-# adaptive_NTK 使用 NTK 方法动态调整各损失项权重
 loss_err  = 'mse'
 optimizer = 'adam'
 adaptive_NTK = {'method':'NTK','freq':100}
@@ -148,20 +148,20 @@ adaptive_NTK = {'method':'NTK','freq':100}
 # In[ ]:
 
 
-sn.reset_session()
+sn.reset_session()  # 重置 SciANN 会话，清除之前的模型和变量定义，确保后续代码从干净状态开始执行
 
 
 # In[ ]:
 
 
 # 构建神经网络 - joint 方法，同时学习 S、I 和 beta_s（对应论文 Section 2.2）
+
 # ts 是归一化时间变量；Ss/Is 分别表示 S_s_hat(ts) 和 I_s_hat(ts)
-# 4*[50] 表示 4 个隐藏层、每层 50 个神经元；square 保证输出非负
-# Beta 是待识别的传播率参数 beta_s_hat(ts)，这里设为非负常数参数
 ts  = sn.Variable('ts')
+# 两个神经网络分别拟合 S_s 和 I_s，输出层使用 square 激活函数保证非负；网络结构为 4 层、每层 50 个神经元
 Ss = sn.Functional('Ss', ts, 4*[50], output_activation='square')
 Is = sn.Functional('Is', ts, 4*[50], output_activation='square')
-
+# Beta 是待识别的传播率参数 beta_s_hat(ts)，这里设为非负常数参数
 Beta = sn.Parameter(name='Beta', inputs=ts, non_neg=True)
 
 # 根据守恒关系计算 R_s（对应论文中的 N=S+I+R）
@@ -172,15 +172,14 @@ Rs = N/C-Is-Ss
 # In[ ]:
 
 
-# 用 sign 构造 t=t0 处的初始条件约束（对应论文 Eq. (8)）
+# 用 sign 符号函数构造 t=t0 处的初始条件约束（对应论文 Eq. (9)）
 # 乘子 (1-sign(ts-t0/tf)) 只在初始时刻附近起作用
 # 三个残差分别约束 S_s(0)、I_s(0)、R_s(0) 的初始值
 L_S0 = sn.rename((Ss-S0/C)*(1-sn.sign(ts-t0/tf)), 'L_S0')
 L_I0 = sn.rename((Is-I0/C)*(1-sn.sign(ts-t0/tf)), 'L_I0')
 L_R0 = sn.rename((Rs-R0/C)*(1-sn.sign(ts-t0/tf)), 'L_R0')
 
-# ODE 残差使用缩放后的 S/I/R 变量（对应论文 Eq. (7)-(9)）
-# 分别约束 dS_s/dt_s + C1*beta_s*I_s*S_s、dI_s/dt_s - C1*beta_s*I_s*S_s + C2*I_s、dR_s/dt_s - C2*I_s
+# ODE 残差使用缩放后的 S/I/R 变量（对应论文 Eq. (8)）
 # 这些 PDE 项会在 collocation 点上参与物理约束训练
 L_dSdt = sn.rename((sn.diff(Ss,ts)+C1*Beta*Is*Ss), 'L_dSdt')
 L_dIdt = sn.rename((sn.diff(Is,ts)-C1*Beta*Is*Ss+C2*Is), 'L_dIdt')
@@ -191,13 +190,15 @@ L_dRdt = sn.rename((sn.diff(Rs,ts)-C2*Is), 'L_dRdt')
 
 
 # 构建 joint 模型的损失函数，包含 ODE 残差、初始条件和数据项（对应论文 Eq. (10)）
-# 整体形式为 L_joint = L_D + L_ODE + L_IC
+# 整体形式为 L_joint =  L_ODE + L_IC + L_D
 # 最后的 sn.Data(Is) 用观测感染人数约束 I_s 的预测值
-loss_joint = [sn.PDE(L_dSdt),  sn.PDE(L_dIdt),  sn.PDE(L_dRdt), 
-              sn.PDE(L_S0),    sn.PDE(L_I0),    sn.PDE(L_R0),
-              sn.Data(Ss*0.0), sn.Data(Rs*0.0), sn.Data(Is)]
+# loss_joint 是训练对象，SciANN 会根据这个列表来计算总损失并进行训练。
+loss_joint = [sn.PDE(L_dSdt),  sn.PDE(L_dIdt),  sn.PDE(L_dRdt),  # ODE 残差项
+              sn.PDE(L_S0),    sn.PDE(L_I0),    sn.PDE(L_R0),  # 初始条件约束项
+              sn.Data(Ss*0.0), sn.Data(Rs*0.0), sn.Data(Is)]  # 数据项：只约束 I_s，S_s 和 R_s 没有直接数据约束
 
-m = sn.SciModel(ts, loss_joint, loss_err, optimizer)
+# 构建 joint 模型
+m = sn.SciModel(ts, loss_joint, loss_err, optimizer) # SciModel 是 SciANN 的核心类，用于定义 PINN 模型，包含输入变量、损失函数、误差度量和优化器等信息
 
 
 # In[ ]:
@@ -205,23 +206,37 @@ m = sn.SciModel(ts, loss_joint, loss_err, optimizer)
 
 # 组织训练数据和随机 collocation 点
 # 前半部分使用 I_obs 观测数据，后半部分用于 ODE 物理残差约束
-# np.log1p / np.exp 用于在 [0, tf] 上生成更偏向早期时间的采样点
-Nc = 6000    # collocation points
 
-I_obs_sc     = I_obs_sc.reshape(-1,1)
-t_train_ode  = np.random.uniform(np.log1p(t0/tf), np.log1p(1.), Nc)
-t_train_ode  = np.exp(t_train_ode) - 1.
+Nc = 6000    # collocation points
+I_obs_sc     = I_obs_sc.reshape(-1,1)  # 观测数据 I_s 的训练目标
+
+# 时间采样密度偏向早期时间，增加 t=0 附近的采样点密度，有助于 PINN 更好地拟合初始阶段的数据和满足物理约束
+#   np.log1p / np.exp 用于在 [0, tf] 上生成更偏向早期时间的采样点
+#   具体来说所以 t=0 附近的密度比 t=1 附近大约高一倍，时间范围没有改变
+t_train_ode  = np.random.uniform(np.log1p(t0/tf), np.log1p(1.), Nc)  # 在 [log1p(t0/tf), log1p(1)] 上生成 Nc 个随机数，偏向早期时间
+t_train_ode  = np.exp(t_train_ode) - 1.  # 反变换回 [t0/tf, 1]，得到 ODE 约束的训练时间点
+
+# 将观测数据点和 ODE 约束点合并成训练时间 t_train；ids_data 用于标记哪些点对应观测数据，便于后续构建损失函数
 if weekly:
     t_train  = np.concatenate([t_data_sc[::7].reshape(-1,1), t_train_ode.reshape(-1,1)])
     ids_data = np.arange(t_data_sc[::7].size,dtype=np.intp)
 else:
     t_train  = np.concatenate([t_data_sc.reshape(-1,1), t_train_ode.reshape(-1,1)])
     ids_data = np.arange(t_data_sc.size,dtype=np.intp)
-
+    
+# loss_train 是训练目标，区别于 SciModel 定义的 loss_joint，它是一个包含不同类型损失项的列表，SciANN 会根据这个列表来计算总损失并进行训练。
+#   0:3 对应 ODE 残差项
+#   3:6 对应初始条件约束
+#   6:9 对应数据约束，其中 6:8 对应S_s 和 R_s 没有直接数据约束。8 表示 I_s 的数据约束越接近于
+# SciANN 里约定了几种 y_true 写法：
+#   'zeros'：表示这个目标函数的输出应该接近 0，常用于 PDE/ODE residual。
+#   array：表示所有训练输入点都有对应监督值。
+#   (ids, array)：表示只有编号为 ids 的那些输入点有监督值，其他点不参与这个 data loss。
 loss_train   = ['zeros']*8+[(ids_data,I_obs_sc)]
-epochs_joint = 5000
-batch_size   = 100
+epochs_joint = 5000  #  joint 模型的训练轮数
+batch_size   = 100  # 每批次训练的样本数量
 
+# log_params 用于记录训练过程中参数的变化，这里记录 Beta 的训练过程，便于后续和 split 方法对比
 log_params   = {'parameters': Beta,'freq':1}
 
 
@@ -329,14 +344,14 @@ sn.reset_session()
 # 构建神经网络 - split 方法第一步，仅回归 I(t)（对应论文 split approach first step）
 # 这一阶段只根据观测数据拟合缩放后的 I_s(t_s)
 ts  = sn.Variable('ts')
-Isc = sn.Functional('Isc', ts, 4*[50], output_activation='square')
+Isc = sn.Functional('Isc', ts, 4*[50], output_activation='square')  # ISC
 
 
 # In[ ]:
 
 
 # 构建 split 第一阶段的数据回归模型
-# 损失项对应 L_D(I_s)，即预测 I_s 与观测 I_s,obs 之间的均方误差
+# 申明损失目标为观测数据 I_obs_sc
 loss_data = sn.Data(Isc)
 
 m_data = sn.SciModel(ts, loss_data, loss_err, optimizer)
@@ -407,7 +422,7 @@ print(f'Isc error: {Isc_err:.3e}')
 # 冻结第一阶段学到的 I 网络权重，作为第二阶段的已知 I(t)
 Isc_weights = Isc.get_weights()
 
-Is = sn.Functional('Is', ts, 4*[50], output_activation='square', trainable=False)
+Is = sn.Functional('Is', ts, 4*[50], output_activation='square', trainable=False)  # 冻结，trainable=False
 Is.set_weights(Isc_weights)
 
 
@@ -441,9 +456,9 @@ L_dRdt = sn.rename((sn.diff(Rs,ts)-C2*Is), 'L_dRdt')
 
 # 构建 split 第二阶段的物理约束模型
 # 损失包含 L_ODE + L_IC，并额外保持固定 I 网络的一致性
-loss_ode = [sn.PDE(L_dSdt),  sn.PDE(L_dIdt),  sn.PDE(L_dRdt), 
-            sn.PDE(L_S0), sn.PDE(L_R0), 
-            sn.Data(Ss*0.0), sn.Data(Rs*0.0), sn.Data(Is*0.0)]
+loss_ode = [sn.PDE(L_dSdt),  sn.PDE(L_dIdt),  sn.PDE(L_dRdt),  # PDE 物理损失
+            sn.PDE(L_S0), sn.PDE(L_R0),                        # 边界损失项，I 已经先训练好并冻结，所以不再加 L_I0
+            sn.Data(Ss*0.0), sn.Data(Rs*0.0), sn.Data(Is*0.0)] 
 
 m_ode = sn.SciModel(ts, loss_ode, loss_err, optimizer)
 

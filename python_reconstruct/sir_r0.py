@@ -63,7 +63,6 @@ def sir_ode(x, t, delta, beta, population, t0):
         delta * infectious,
     ]
 
-
 class ConstantSIRData(object):
     """Synthetic case 1 data and scaling.
 
@@ -78,7 +77,7 @@ class ConstantSIRData(object):
 
     def __init__(self, weekly=False):
         # 人口与流行病学参数。delta=1/D，D=5 天表示平均感染期。
-        self.N = 56e6
+        self.N = 56e6  # 
         self.delta = 1 / 5
         self.r0 = 3.0
         self.beta = self.delta * self.r0
